@@ -12,6 +12,7 @@ import 'camera_doc_scanner_screen.dart';
 import 'office_viewer_screen.dart';
 import 'pdf_viewer_screen.dart';
 import 'quick_drop_screen.dart';
+import 'text_editor_screen.dart';
 
 class DocumentSuiteScreen extends StatefulWidget {
   final int initialTabIndex;
@@ -87,6 +88,13 @@ class _DocumentSuiteScreenState extends State<DocumentSuiteScreen>
         context,
         MaterialPageRoute(
           builder: (_) => PdfViewerScreen(filePath: item.path, title: item.name),
+        ),
+      );
+    } else if (ext == '.txt') {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => TextEditorScreen(filePath: item.path, fileName: item.name),
         ),
       );
     } else {

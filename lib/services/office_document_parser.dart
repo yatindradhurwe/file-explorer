@@ -144,6 +144,11 @@ class ParsedExcelDoc {
 // PARSER ENGINE
 // ==========================================
 class OfficeDocumentParser {
+  /// Extensions the in-app Office viewer can open.
+  static const Set<String> supportedExtensions = {
+    '.docx', '.doc', '.rtf', '.odt', '.pptx', '.ppt', '.xlsx', '.xls', '.csv', '.tsv',
+  };
+
   static OfficeFileType detectFileType(String filePath) {
     final ext = p.extension(filePath).toLowerCase();
     switch (ext) {
@@ -151,6 +156,7 @@ class OfficeDocumentParser {
       case '.doc':
       case '.rtf':
       case '.odt':
+      case '.txt':
         return OfficeFileType.word;
       case '.pptx':
       case '.ppt':
@@ -186,11 +192,18 @@ class OfficeDocumentParser {
         );
       }
 
-      if (ext == '.docx') {
-        return await _parseDocx(file, fileName);
-      } else {
-        // Fallback for legacy .doc / .rtf binary files
-        return await _parseBinaryDoc(file, fileName);
+      switch (ext) {
+        case '.docx':
+          return await _parseDocx(file, fileName);
+        case '.odt':
+          return await _parseOdt(file, fileName);
+        case '.rtf':
+          return _buildWordDoc(fileName, _rtfToPlainText(await file.readAsString(encoding: latin1)));
+        case '.txt':
+          return _buildWordDoc(fileName, utf8.decode(await file.readAsBytes(), allowMalformed: true));
+        default:
+          // Fallback for legacy .doc binary files
+          return await _parseBinaryDoc(file, fileName);
       }
     } catch (e, stack) {
       debugPrint('Error parsing Word doc $filePath: $e\n$stack');
@@ -227,77 +240,77 @@ class OfficeDocumentParser {
     final List<DocParagraph> parsedParagraphs = [];
     int totalWords = 0;
 
-    final body = document.findAllElements('w:body').firstOrNull;
-    if (body != null) {
-      for (final child in body.children) {
-        if (child is! XmlElement) continue;
+    void visit(XmlElement container) {
+      for (final child in container.childElements) {
+        switch (child.name.local) {
+          case 'p':
+            final pStyle = child.findAllElements('w:pStyle').firstOrNull?.getAttribute('w:val') ?? '';
+            final isTitle = pStyle.toLowerCase().contains('title');
+            final isHeading1 = pStyle.toLowerCase().contains('heading1');
+            final isHeading2 = pStyle.toLowerCase().contains('heading2') || pStyle.toLowerCase().contains('heading3');
+            final isBullet = child.findAllElements('w:numPr').isNotEmpty;
 
-        if (child.name.local == 'p') {
-          // Paragraph
-          final pStyle = child.findAllElements('w:pStyle').firstOrNull?.getAttribute('w:val') ?? '';
-          final isTitle = pStyle.toLowerCase().contains('title');
-          final isHeading1 = pStyle.toLowerCase().contains('heading1');
-          final isHeading2 = pStyle.toLowerCase().contains('heading2') || pStyle.toLowerCase().contains('heading3');
-          final isBullet = child.findAllElements('w:numPr').isNotEmpty;
-
-          final StringBuffer sb = StringBuffer();
-          bool isBold = false;
-          bool isItalic = false;
-
-          for (final run in child.findAllElements('w:r')) {
-            if (run.findAllElements('w:b').isNotEmpty) isBold = true;
-            if (run.findAllElements('w:i').isNotEmpty) isItalic = true;
-
-            for (final t in run.findAllElements('w:t')) {
-              sb.write(t.innerText);
+            bool isBold = false;
+            bool isItalic = false;
+            for (final run in child.findAllElements('w:r')) {
+              if (_isToggleOn(run.findAllElements('w:b').firstOrNull)) isBold = true;
+              if (_isToggleOn(run.findAllElements('w:i').firstOrNull)) isItalic = true;
             }
-          }
 
-          final text = sb.toString().trim();
-          if (text.isNotEmpty) {
-            final words = text.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).length;
-            totalWords += words;
-
-            parsedParagraphs.add(
-              DocParagraph(
-                text: text,
-                isHeading: isTitle || isHeading1 || isHeading2,
-                headingLevel: isTitle ? 1 : (isHeading1 ? 2 : (isHeading2 ? 3 : 0)),
-                isBullet: isBullet,
-                isBold: isBold,
-                isItalic: isItalic,
-              ),
-            );
-          }
-        } else if (child.name.local == 'tbl') {
-          // Table
-          final List<List<String>> tableData = [];
-          for (final row in child.findAllElements('w:tr')) {
-            final List<String> rowData = [];
-            for (final cell in row.findAllElements('w:tc')) {
-              final cellText = cell
-                  .findAllElements('w:t')
-                  .map((e) => e.innerText)
-                  .join(' ')
-                  .trim();
-              rowData.add(cellText);
+            final text = _docxText(child).trim();
+            if (text.isNotEmpty) {
+              totalWords += _countWords(text);
+              parsedParagraphs.add(
+                DocParagraph(
+                  text: text,
+                  isHeading: isTitle || isHeading1 || isHeading2,
+                  headingLevel: isTitle ? 1 : (isHeading1 ? 2 : (isHeading2 ? 3 : 0)),
+                  isBullet: isBullet,
+                  isBold: isBold,
+                  isItalic: isItalic,
+                ),
+              );
             }
-            if (rowData.isNotEmpty) {
-              tableData.add(rowData);
+            break;
+          case 'tbl':
+            final List<List<String>> tableData = [];
+            for (final row in child.findAllElements('w:tr')) {
+              final List<String> rowData = [];
+              for (final cell in row.findAllElements('w:tc')) {
+                final cellText = cell
+                    .findAllElements('w:p')
+                    .map((para) => _docxText(para).trim())
+                    .where((t) => t.isNotEmpty)
+                    .join(' ');
+                rowData.add(cellText);
+              }
+              if (rowData.isNotEmpty) {
+                tableData.add(rowData);
+              }
             }
-          }
 
-          if (tableData.isNotEmpty) {
-            parsedParagraphs.add(
-              DocParagraph(
-                text: 'Table with ${tableData.length} rows',
-                tableData: tableData,
-              ),
-            );
-          }
+            if (tableData.isNotEmpty) {
+              parsedParagraphs.add(
+                DocParagraph(
+                  text: 'Table with ${tableData.length} rows',
+                  tableData: _padRows(tableData),
+                ),
+              );
+            }
+            break;
+          case 'sdt':
+          case 'sdtContent':
+          case 'customXml':
+          case 'ins':
+            // Content controls (cover pages, TOCs) and tracked insertions wrap regular paragraphs
+            visit(child);
+            break;
         }
       }
     }
+
+    final body = document.findAllElements('w:body').firstOrNull;
+    if (body != null) visit(body);
 
     if (parsedParagraphs.isEmpty) {
       parsedParagraphs.add(const DocParagraph(text: 'This document contains no readable text.'));
@@ -314,37 +327,222 @@ class OfficeDocumentParser {
     );
   }
 
+  static Future<ParsedWordDoc> _parseOdt(File file, String fileName) async {
+    final archive = ZipDecoder().decodeBytes(await file.readAsBytes());
+    final contentFile = archive.findFile('content.xml');
+    if (contentFile == null) {
+      return _buildWordDoc(fileName, '');
+    }
+
+    final document = XmlDocument.parse(utf8.decode(contentFile.content as List<int>));
+    final List<DocParagraph> paragraphs = [];
+    int totalWords = 0;
+
+    for (final el in document.descendantElements) {
+      final isHeading = el.name.qualified == 'text:h';
+      if (!isHeading && el.name.qualified != 'text:p') continue;
+      // Skip paragraphs nested inside another paragraph (e.g. notes); the parent already includes them
+      if (el.ancestorElements.any((a) => a.name.qualified == 'text:p' || a.name.qualified == 'text:h')) continue;
+
+      final text = _odtText(el).trim();
+      if (text.isEmpty) continue;
+      totalWords += _countWords(text);
+
+      final level = int.tryParse(el.getAttribute('text:outline-level') ?? '') ?? 1;
+      paragraphs.add(
+        DocParagraph(
+          text: text,
+          isHeading: isHeading,
+          headingLevel: isHeading ? level.clamp(1, 3) : 0,
+          isBullet: el.ancestorElements.any((a) => a.name.qualified == 'text:list-item'),
+        ),
+      );
+    }
+
+    if (paragraphs.isEmpty) {
+      paragraphs.add(const DocParagraph(text: 'This document contains no readable text.'));
+    }
+
+    return ParsedWordDoc(
+      title: fileName,
+      paragraphs: paragraphs,
+      pages: _paginateParagraphs(paragraphs),
+      wordCount: totalWords,
+    );
+  }
+
   static Future<ParsedWordDoc> _parseBinaryDoc(File file, String fileName) async {
     final bytes = await file.readAsBytes();
-    final content = _extractStringsFromBinary(bytes);
+    return _buildWordDoc(
+      fileName,
+      _extractStringsFromBinary(bytes),
+      emptyMessage: 'No readable text could be extracted from this binary file.',
+    );
+  }
 
+  /// Builds a document from plain text, one paragraph per non-empty line.
+  static ParsedWordDoc _buildWordDoc(
+    String fileName,
+    String content, {
+    String emptyMessage = 'This document contains no readable text.',
+  }) {
     final lines = content
-        .split('\n')
+        .split(RegExp(r'\r?\n'))
         .map((l) => l.trim())
-        .where((l) => l.length > 2)
+        .where((l) => l.isNotEmpty)
         .toList();
 
     final List<DocParagraph> paragraphs = [];
     int totalWords = 0;
 
     for (final line in lines) {
-      final words = line.split(RegExp(r'\s+')).length;
-      totalWords += words;
+      totalWords += _countWords(line);
       paragraphs.add(DocParagraph(text: line));
     }
 
     if (paragraphs.isEmpty) {
-      paragraphs.add(const DocParagraph(text: 'No readable text could be extracted from this binary file.'));
+      paragraphs.add(DocParagraph(text: emptyMessage));
     }
-
-    final pages = _paginateParagraphs(paragraphs);
 
     return ParsedWordDoc(
       title: fileName,
       paragraphs: paragraphs,
-      pages: pages,
+      pages: _paginateParagraphs(paragraphs),
       wordCount: totalWords,
     );
+  }
+
+  static int _countWords(String text) =>
+      text.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).length;
+
+  /// `<w:b/>` means on; `<w:b w:val="0"/>` or `"false"` explicitly turns it off.
+  static bool _isToggleOn(XmlElement? el) {
+    if (el == null) return false;
+    final val = el.getAttribute('w:val');
+    return val == null || !(val == '0' || val == 'false' || val == 'off');
+  }
+
+  static String _docxText(XmlElement paragraph) {
+    final sb = StringBuffer();
+    for (final el in paragraph.descendantElements) {
+      switch (el.name.qualified) {
+        case 'w:t':
+          sb.write(el.innerText);
+          break;
+        case 'w:tab':
+          // w:tab inside w:pPr/w:tabs is a tab-stop definition, not a character
+          if (el.parentElement?.name.local == 'r') sb.write('\t');
+          break;
+        case 'w:br':
+        case 'w:cr':
+          sb.write('\n');
+          break;
+      }
+    }
+    return sb.toString();
+  }
+
+  static String _odtText(XmlElement el) {
+    final sb = StringBuffer();
+    for (final node in el.children) {
+      if (node is XmlText) {
+        sb.write(node.value);
+      } else if (node is XmlElement) {
+        switch (node.name.qualified) {
+          case 'text:s':
+            sb.write(' ' * (int.tryParse(node.getAttribute('text:c') ?? '') ?? 1));
+            break;
+          case 'text:tab':
+            sb.write('\t');
+            break;
+          case 'text:line-break':
+            sb.write('\n');
+            break;
+          case 'text:note':
+          case 'office:annotation':
+            break;
+          default:
+            sb.write(_odtText(node));
+        }
+      }
+    }
+    return sb.toString();
+  }
+
+  /// Strips RTF control words and groups, keeping the visible text.
+  static String _rtfToPlainText(String rtf) {
+    const skipDestinations = {
+      'fonttbl', 'colortbl', 'stylesheet', 'info', 'pict', 'header', 'footer',
+      'headerl', 'headerr', 'footerl', 'footerr', 'listtable', 'listoverridetable',
+      'rsidtbl', 'generator', 'xmlnstbl', 'themedata', 'colorschememapping',
+      'latentstyles', 'datastore', 'object', 'fldinst', 'filetbl', 'revtbl',
+    };
+    final sb = StringBuffer();
+    // Per group: whether its content is hidden
+    final skipStack = <bool>[false];
+    int i = 0;
+
+    while (i < rtf.length) {
+      final ch = rtf[i];
+      final skipping = skipStack.last;
+      if (ch == '{') {
+        skipStack.add(skipping);
+        i++;
+      } else if (ch == '}') {
+        if (skipStack.length > 1) skipStack.removeLast();
+        i++;
+      } else if (ch == '\\') {
+        i++;
+        if (i >= rtf.length) break;
+        final next = rtf[i];
+        if (next == '\\' || next == '{' || next == '}') {
+          if (!skipping) sb.write(next);
+          i++;
+        } else if (next == '*') {
+          skipStack[skipStack.length - 1] = true;
+          i++;
+        } else if (next == "'") {
+          final hex = i + 2 < rtf.length ? rtf.substring(i + 1, i + 3) : '';
+          final code = int.tryParse(hex, radix: 16);
+          if (!skipping && code != null) sb.writeCharCode(code);
+          i += 3;
+        } else if (RegExp(r'[a-zA-Z]').hasMatch(next)) {
+          final match = RegExp(r'([a-zA-Z]+)(-?\d+)? ?').matchAsPrefix(rtf, i)!;
+          final word = match.group(1)!;
+          final param = int.tryParse(match.group(2) ?? '');
+          i = match.end;
+          if (skipDestinations.contains(word)) {
+            skipStack[skipStack.length - 1] = true;
+          } else if (!skipping) {
+            switch (word) {
+              case 'par':
+              case 'line':
+              case 'row':
+                sb.write('\n');
+                break;
+              case 'tab':
+              case 'cell':
+                sb.write('\t');
+                break;
+              case 'u':
+                if (param != null) sb.writeCharCode(param < 0 ? param + 65536 : param);
+                // Skip the ANSI fallback character that follows \uN
+                if (i < rtf.length && rtf[i] != '\\' && rtf[i] != '{' && rtf[i] != '}') i++;
+                break;
+            }
+          }
+        } else {
+          // Control symbols such as \~ (non-breaking space) or \- (optional hyphen)
+          if (!skipping && next == '~') sb.write(' ');
+          i++;
+        }
+      } else {
+        if (!skipping && ch != '\r' && ch != '\n') sb.write(ch);
+        i++;
+      }
+    }
+
+    return sb.toString();
   }
 
   static List<DocPage> _paginateParagraphs(List<DocParagraph> paragraphs) {
@@ -444,15 +642,24 @@ class OfficeDocumentParser {
         final ph = sp.findAllElements('p:ph').firstOrNull;
         final phType = ph?.getAttribute('type') ?? '';
         final isTitleShape = phType == 'title' || phType == 'ctrTitle';
+        // Body placeholders are bulleted by the slide layout unless a paragraph turns it off
+        final isBodyShape = ph != null && (phType.isEmpty || phType == 'body' || phType == 'obj');
 
         final paragraphs = sp.findAllElements('a:p');
         for (final p in paragraphs) {
           final text = p.findAllElements('a:t').map((e) => e.innerText).join('').trim();
           if (text.isEmpty) continue;
 
+          final pPr = p.getElement('a:pPr');
+          final hasBulletMarker = pPr != null &&
+              (pPr.getAttribute('lvl') != null ||
+                  pPr.getElement('a:buChar') != null ||
+                  pPr.getElement('a:buAutoNum') != null);
+          final bulletsOff = pPr?.getElement('a:buNone') != null;
+
           if (isTitleShape && slideTitle.isEmpty) {
             slideTitle = text;
-          } else if (p.getAttribute('lvl') != null || p.findAllElements('a:buChar').isNotEmpty) {
+          } else if (!bulletsOff && (hasBulletMarker || isBodyShape)) {
             bullets.add(text);
           } else {
             textBlocks.add(text);
@@ -477,7 +684,7 @@ class OfficeDocumentParser {
           }
           if (row.isNotEmpty) rows.add(row);
         }
-        if (rows.isNotEmpty) table = rows;
+        if (rows.isNotEmpty) table = _padRows(rows);
       }
 
       parsedSlides.add(
@@ -610,38 +817,64 @@ class OfficeDocumentParser {
       final sstXml = utf8.decode(sstFile.content as List<int>);
       final doc = XmlDocument.parse(sstXml);
       for (final si in doc.findAllElements('si')) {
-        final text = si.findAllElements('t').map((e) => e.innerText).join('');
+        // Skip phonetic guides (rPh), which also contain <t> elements
+        final text = si
+            .findAllElements('t')
+            .where((t) => !t.ancestorElements.any((a) => a.name.local == 'rPh'))
+            .map((e) => e.innerText)
+            .join('');
         sharedStrings.add(text);
       }
     }
 
-    // 2. Parse Workbook Sheet Names
-    final List<String> sheetNames = [];
+    // 2. Parse Workbook Sheets (in tab order) and resolve their worksheet files
+    final Map<String, String> relTargets = {};
+    final relsFile = archive.findFile('xl/_rels/workbook.xml.rels');
+    if (relsFile != null) {
+      final doc = XmlDocument.parse(utf8.decode(relsFile.content as List<int>));
+      for (final rel in doc.findAllElements('Relationship')) {
+        final id = rel.getAttribute('Id');
+        final target = rel.getAttribute('Target');
+        if (id == null || target == null) continue;
+        relTargets[id] = target.startsWith('/') ? target.substring(1) : p.posix.normalize('xl/$target');
+      }
+    }
+
+    final List<(String, ArchiveFile)> sheetEntries = [];
     final wbFile = archive.findFile('xl/workbook.xml');
     if (wbFile != null) {
       final wbXml = utf8.decode(wbFile.content as List<int>);
       final doc = XmlDocument.parse(wbXml);
-      for (final s in doc.findAllElements('sheet')) {
-        final name = s.getAttribute('name') ?? 'Sheet ${sheetNames.length + 1}';
-        sheetNames.add(name);
+      final sheets = doc.findAllElements('sheet').toList();
+      for (int i = 0; i < sheets.length; i++) {
+        final s = sheets[i];
+        final name = s.getAttribute('name') ?? 'Sheet ${i + 1}';
+        final relId = s.attributes.where((a) => a.name.local == 'id').firstOrNull?.value;
+        final target = relTargets[relId];
+        final sheetFile = archive.findFile(target ?? 'xl/worksheets/sheet${i + 1}.xml');
+        if (sheetFile != null) sheetEntries.add((name, sheetFile));
+      }
+    }
+
+    if (sheetEntries.isEmpty) {
+      // No usable workbook.xml: fall back to the worksheet files in numeric order
+      final sheetFiles = archive.files
+          .where((f) => RegExp(r'xl/worksheets/sheet\d+\.xml$').hasMatch(f.name))
+          .toList();
+      sheetFiles.sort((a, b) {
+        final numA = int.tryParse(RegExp(r'\d+').stringMatch(a.name) ?? '0') ?? 0;
+        final numB = int.tryParse(RegExp(r'\d+').stringMatch(b.name) ?? '0') ?? 0;
+        return numA.compareTo(numB);
+      });
+      for (int i = 0; i < sheetFiles.length; i++) {
+        sheetEntries.add(('Sheet ${i + 1}', sheetFiles[i]));
       }
     }
 
     // 3. Parse Worksheet Data
-    final sheetFiles = archive.files
-        .where((f) => RegExp(r'xl/worksheets/sheet\d+\.xml$').hasMatch(f.name))
-        .toList();
-
-    sheetFiles.sort((a, b) {
-      final numA = int.tryParse(RegExp(r'\d+').stringMatch(a.name) ?? '0') ?? 0;
-      final numB = int.tryParse(RegExp(r'\d+').stringMatch(b.name) ?? '0') ?? 0;
-      return numA.compareTo(numB);
-    });
-
     final List<ExcelSheetData> parsedSheets = [];
 
-    for (int i = 0; i < sheetFiles.length; i++) {
-      final sheetFile = sheetFiles[i];
+    for (final (sheetTitle, sheetFile) in sheetEntries) {
       final sheetXml = utf8.decode(sheetFile.content as List<int>);
       final doc = XmlDocument.parse(sheetXml);
 
@@ -651,6 +884,14 @@ class OfficeDocumentParser {
       for (final rowElem in doc.findAllElements('row')) {
         final List<String> rowCells = [];
         for (final c in rowElem.findAllElements('c')) {
+          // Empty cells are omitted from the XML, so place each cell by its reference (e.g. "C2")
+          final col = _columnIndex(c.getAttribute('r'));
+          if (col != null) {
+            while (rowCells.length < col) {
+              rowCells.add('');
+            }
+          }
+
           final type = c.getAttribute('t') ?? '';
           final vElem = c.findAllElements('v').firstOrNull;
           String val = '';
@@ -671,17 +912,19 @@ class OfficeDocumentParser {
           rowCells.add(val);
         }
 
+        while (rowCells.isNotEmpty && rowCells.last.isEmpty) {
+          rowCells.removeLast();
+        }
         if (rowCells.isNotEmpty) {
           if (rowCells.length > maxCols) maxCols = rowCells.length;
           rows.add(rowCells);
         }
       }
 
-      final sheetTitle = (i < sheetNames.length) ? sheetNames[i] : 'Sheet ${i + 1}';
       parsedSheets.add(
         ExcelSheetData(
           name: sheetTitle,
-          rows: rows,
+          rows: _padRows(rows),
           totalRows: rows.length,
           totalColumns: maxCols,
         ),
@@ -705,16 +948,12 @@ class OfficeDocumentParser {
   }
 
   static Future<ParsedExcelDoc> _parseCsv(File file, String fileName, bool isTsv) async {
-    final lines = await file.readAsLines(encoding: utf8);
-    final delimiter = isTsv ? '\t' : ',';
-    final List<List<String>> rows = [];
+    var content = utf8.decode(await file.readAsBytes(), allowMalformed: true);
+    if (content.startsWith('﻿')) content = content.substring(1);
+    final rows = _parseDelimited(content, isTsv ? '\t' : ',');
     int maxCols = 0;
-
-    for (final line in lines) {
-      if (line.trim().isEmpty) continue;
-      final cells = _splitCsvLine(line, delimiter);
-      if (cells.length > maxCols) maxCols = cells.length;
-      rows.add(cells);
+    for (final row in rows) {
+      if (row.length > maxCols) maxCols = row.length;
     }
 
     return ParsedExcelDoc(
@@ -722,7 +961,7 @@ class OfficeDocumentParser {
       sheets: [
         ExcelSheetData(
           name: fileName,
-          rows: rows,
+          rows: _padRows(rows),
           totalRows: rows.length,
           totalColumns: maxCols,
         ),
@@ -746,7 +985,7 @@ class OfficeDocumentParser {
       sheets: [
         ExcelSheetData(
           name: 'Extracted Data',
-          rows: rows,
+          rows: _padRows(rows),
           totalRows: rows.length,
           totalColumns: 4,
         ),
@@ -763,98 +1002,86 @@ class OfficeDocumentParser {
       author: 'File Explore by yjtechnosoft',
     );
 
-    for (final page in doc.pages) {
-      pdf.addPage(
-        pw.Page(
-          pageFormat: PdfPageFormat.a4,
-          margin: const pw.EdgeInsets.all(32),
-          build: (pw.Context context) {
-            return pw.Column(
-              crossAxisAlignment: pw.CrossAxisAlignment.start,
+    final paraStyle = pw.TextStyle(fontSize: 10.5, lineSpacing: 2.5);
+
+    // MultiPage lets long paragraphs and tables flow onto following pages instead of being cut off
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.all(32),
+        header: (pw.Context context) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Row(
+              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
               children: [
-                pw.Row(
-                  mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-                  children: [
-                    pw.Text(
-                      doc.title,
-                      style: pw.TextStyle(
-                        fontSize: 10,
-                        color: PdfColors.grey700,
-                        fontWeight: pw.FontWeight.bold,
-                      ),
-                    ),
-                    pw.Text(
-                      'Page ${page.pageNumber} of ${doc.pages.length}',
-                      style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey500),
-                    ),
-                  ],
+                pw.Text(
+                  doc.title,
+                  style: pw.TextStyle(
+                    fontSize: 10,
+                    color: PdfColors.grey700,
+                    fontWeight: pw.FontWeight.bold,
+                  ),
                 ),
-                pw.Divider(thickness: 0.8, color: PdfColors.grey300),
-                pw.SizedBox(height: 12),
-                ...page.paragraphs.map((p) {
-                  if (p.isTable && p.tableData != null) {
-                    return pw.Padding(
-                      padding: const pw.EdgeInsets.symmetric(vertical: 8),
-                      child: pw.TableHelper.fromTextArray(
-                        data: p.tableData!,
-                        headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, color: PdfColors.white),
-                        headerDecoration: const pw.BoxDecoration(color: PdfColors.blue800),
-                        cellStyle: const pw.TextStyle(fontSize: 9),
-                        cellPadding: const pw.EdgeInsets.all(4),
-                      ),
-                    );
-                  }
-
-                  if (p.isHeading) {
-                    return pw.Padding(
-                      padding: const pw.EdgeInsets.symmetric(vertical: 6),
-                      child: pw.Text(
-                        p.text,
-                        style: pw.TextStyle(
-                          fontSize: p.headingLevel == 1 ? 18 : 14,
-                          fontWeight: pw.FontWeight.bold,
-                          color: PdfColors.blue900,
-                        ),
-                      ),
-                    );
-                  }
-
-                  return pw.Padding(
-                    padding: const pw.EdgeInsets.symmetric(vertical: 3),
-                    child: pw.Row(
-                      crossAxisAlignment: pw.CrossAxisAlignment.start,
-                      children: [
-                        if (p.isBullet)
-                          pw.Container(
-                            margin: const pw.EdgeInsets.only(top: 4, right: 6),
-                            width: 4,
-                            height: 4,
-                            decoration: const pw.BoxDecoration(
-                              color: PdfColors.black,
-                              shape: pw.BoxShape.circle,
-                            ),
-                          ),
-                        pw.Expanded(
-                          child: pw.Text(
-                            p.text,
-                            style: pw.TextStyle(
-                              fontSize: 10.5,
-                              lineSpacing: 2.5,
-                              fontWeight: p.isBold ? pw.FontWeight.bold : pw.FontWeight.normal,
-                              fontStyle: p.isItalic ? pw.FontStyle.italic : pw.FontStyle.normal,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                }),
+                pw.Text(
+                  'Page ${context.pageNumber} of ${context.pagesCount}',
+                  style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey500),
+                ),
               ],
-            );
-          },
+            ),
+            pw.Divider(thickness: 0.8, color: PdfColors.grey300),
+            pw.SizedBox(height: 12),
+          ],
         ),
-      );
-    }
+        // Text and Table only split across pages when they are direct MultiPage children
+        // (not wrapped in Padding or Row), so spacing is added with separate SizedBoxes.
+        build: (pw.Context context) => doc.paragraphs.expand<pw.Widget>((p) {
+          if (p.isTable && p.tableData != null) {
+            return [
+              pw.SizedBox(height: 8),
+              pw.TableHelper.fromTextArray(
+                data: p.tableData!,
+                headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, color: PdfColors.white),
+                headerDecoration: const pw.BoxDecoration(color: PdfColors.blue800),
+                cellStyle: const pw.TextStyle(fontSize: 9),
+                cellPadding: const pw.EdgeInsets.all(4),
+              ),
+              pw.SizedBox(height: 8),
+            ];
+          }
+
+          if (p.isHeading) {
+            return [
+              pw.SizedBox(height: 6),
+              pw.Text(
+                p.text,
+                style: pw.TextStyle(
+                  fontSize: p.headingLevel == 1 ? 18 : 14,
+                  fontWeight: pw.FontWeight.bold,
+                  color: PdfColors.blue900,
+                ),
+              ),
+              pw.SizedBox(height: 6),
+            ];
+          }
+
+          final style = paraStyle.copyWith(
+            fontWeight: p.isBold ? pw.FontWeight.bold : pw.FontWeight.normal,
+            fontStyle: p.isItalic ? pw.FontStyle.italic : pw.FontStyle.normal,
+          );
+
+          return [
+            pw.SizedBox(height: 3),
+            pw.Text(
+              p.isBullet ? '•  ${p.text}' : p.text,
+              style: style,
+              overflow: pw.TextOverflow.span,
+            ),
+            pw.SizedBox(height: 3),
+          ];
+        }).toList(),
+      ),
+    );
 
     final tempDir = await getTemporaryDirectory();
     final cleanTitle = doc.title.replaceAll(RegExp(r'[^\w\-_.]'), '_');
@@ -980,54 +1207,51 @@ class OfficeDocumentParser {
       author: 'File Explore Spreadsheet Engine',
     );
 
-    const rowsPerPage = 25;
-    final totalPages = (sheet.rows.length / rowsPerPage).ceil();
-
-    for (int p = 0; p < totalPages; p++) {
-      final start = p * rowsPerPage;
-      final end = (start + rowsPerPage < sheet.rows.length) ? start + rowsPerPage : sheet.rows.length;
-      final pageRows = sheet.rows.sublist(start, end);
-
-      pdf.addPage(
-        pw.Page(
-          pageFormat: PdfPageFormat.a4.landscape,
-          margin: const pw.EdgeInsets.all(20),
-          build: (pw.Context context) {
-            return pw.Column(
-              crossAxisAlignment: pw.CrossAxisAlignment.start,
+    // One MultiPage table: rows flow onto as many pages as needed and the header row repeats
+    // on each page (splitting into fixed pages used to turn every page's first data row into a header)
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4.landscape,
+        margin: const pw.EdgeInsets.all(20),
+        header: (pw.Context context) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Row(
+              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
               children: [
-                pw.Row(
-                  mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-                  children: [
-                    pw.Text(
-                      '$title - ${sheet.name}',
-                      style: pw.TextStyle(
-                        fontSize: 14,
-                        fontWeight: pw.FontWeight.bold,
-                        color: PdfColors.green900,
-                      ),
-                    ),
-                    pw.Text(
-                      'Page ${p + 1} of $totalPages (${sheet.totalRows} total rows)',
-                      style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey700),
-                    ),
-                  ],
+                pw.Text(
+                  '$title - ${sheet.name}',
+                  style: pw.TextStyle(
+                    fontSize: 14,
+                    fontWeight: pw.FontWeight.bold,
+                    color: PdfColors.green900,
+                  ),
                 ),
-                pw.Divider(thickness: 1, color: PdfColors.green700),
-                pw.SizedBox(height: 8),
-                pw.TableHelper.fromTextArray(
-                  data: pageRows,
-                  headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, color: PdfColors.white),
-                  headerDecoration: const pw.BoxDecoration(color: PdfColors.green800),
-                  cellStyle: const pw.TextStyle(fontSize: 8.5),
-                  cellPadding: const pw.EdgeInsets.all(3),
+                pw.Text(
+                  'Page ${context.pageNumber} of ${context.pagesCount} (${sheet.totalRows} total rows)',
+                  style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey700),
                 ),
               ],
-            );
-          },
+            ),
+            pw.Divider(thickness: 1, color: PdfColors.green700),
+            pw.SizedBox(height: 8),
+          ],
         ),
-      );
-    }
+        build: (pw.Context context) => [
+          if (sheet.rows.isEmpty)
+            pw.Text('This sheet is empty.', style: const pw.TextStyle(color: PdfColors.grey700))
+          else
+            pw.TableHelper.fromTextArray(
+              data: sheet.rows,
+              headerCount: 1,
+              headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, color: PdfColors.white),
+              headerDecoration: const pw.BoxDecoration(color: PdfColors.green800),
+              cellStyle: const pw.TextStyle(fontSize: 8.5),
+              cellPadding: const pw.EdgeInsets.all(3),
+            ),
+        ],
+      ),
+    );
 
     final tempDir = await getTemporaryDirectory();
     final cleanTitle = title.replaceAll(RegExp(r'[^\w\-_.]'), '_');
@@ -1045,8 +1269,26 @@ class OfficeDocumentParser {
     final len = bytes.length;
     int i = 0;
 
+    bool isPrintable(int b) => b >= 32 && b <= 126;
+
     while (i < len) {
-      if (bytes[i] >= 32 && bytes[i] <= 126) {
+      // Legacy Office files (Word 97+, PowerPoint, Excel BIFF8) store most text as UTF-16LE,
+      // i.e. a printable byte followed by 0x00, which the plain ASCII scan below would miss.
+      if (i + 1 < len && isPrintable(bytes[i]) && bytes[i + 1] == 0) {
+        final start = i;
+        final codes = <int>[];
+        while (i + 1 < len && bytes[i + 1] == 0 && (isPrintable(bytes[i]) || bytes[i] == 13 || bytes[i] == 9)) {
+          codes.add(bytes[i] == 13 ? 10 : bytes[i]);
+          i += 2;
+        }
+        if (codes.length >= 4) {
+          buffer.writeln(String.fromCharCodes(codes));
+          continue;
+        }
+        i = start;
+      }
+
+      if (isPrintable(bytes[i])) {
         int start = i;
         while (i < len && bytes[i] >= 32 && bytes[i] <= 126) {
           i++;
@@ -1063,23 +1305,70 @@ class OfficeDocumentParser {
     return buffer.toString();
   }
 
-  static List<String> _splitCsvLine(String line, String delimiter) {
-    final List<String> cells = [];
+  /// RFC 4180 parsing: quoted fields may contain delimiters, newlines and doubled quotes ("").
+  static List<List<String>> _parseDelimited(String content, String delimiter) {
+    final List<List<String>> rows = [];
+    List<String> row = [];
     final StringBuffer sb = StringBuffer();
     bool insideQuotes = false;
 
-    for (int i = 0; i < line.length; i++) {
-      final char = line[i];
-      if (char == '"') {
-        insideQuotes = !insideQuotes;
-      } else if (char == delimiter && !insideQuotes) {
-        cells.add(sb.toString().trim());
+    void endRow() {
+      row.add(sb.toString().trim());
+      sb.clear();
+      if (row.any((c) => c.isNotEmpty)) rows.add(row);
+      row = [];
+    }
+
+    for (int i = 0; i < content.length; i++) {
+      final char = content[i];
+      if (insideQuotes) {
+        if (char == '"') {
+          if (i + 1 < content.length && content[i + 1] == '"') {
+            sb.write('"');
+            i++;
+          } else {
+            insideQuotes = false;
+          }
+        } else {
+          sb.write(char);
+        }
+      } else if (char == '"') {
+        insideQuotes = true;
+      } else if (char == delimiter) {
+        row.add(sb.toString().trim());
         sb.clear();
-      } else {
+      } else if (char == '\n') {
+        endRow();
+      } else if (char != '\r') {
         sb.write(char);
       }
     }
-    cells.add(sb.toString().trim());
-    return cells;
+    if (sb.isNotEmpty || row.isNotEmpty) endRow();
+    return rows;
+  }
+
+  /// Pads every row to the widest row's length. Flutter's Table and the PDF table both need
+  /// rectangular data, while merged cells, sparse sheets and CSV files produce ragged rows.
+  static List<List<String>> _padRows(List<List<String>> rows) {
+    int width = 0;
+    for (final row in rows) {
+      if (row.length > width) width = row.length;
+    }
+    return [
+      for (final row in rows)
+        row.length == width ? row : [...row, ...List.filled(width - row.length, '')],
+    ];
+  }
+
+  /// Converts a cell reference like "C2" or "AA10" to a zero-based column index.
+  static int? _columnIndex(String? cellRef) {
+    if (cellRef == null) return null;
+    final letters = RegExp(r'^[A-Za-z]+').stringMatch(cellRef);
+    if (letters == null) return null;
+    int index = 0;
+    for (final code in letters.toUpperCase().codeUnits) {
+      index = index * 26 + (code - 64);
+    }
+    return index - 1;
   }
 }

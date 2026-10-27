@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/file_item.dart';
 import '../services/file_operations_service.dart';
+import '../services/office_document_parser.dart';
 import '../services/storage_service.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/file_tile.dart';
@@ -76,7 +77,7 @@ class _SearchScreenState extends State<SearchScreen> {
           ),
         ),
       );
-    } else if ({'.xlsx', '.xls', '.csv', '.tsv', '.pptx', '.ppt', '.docx', '.doc', '.rtf'}.contains(item.extension.toLowerCase())) {
+    } else if (OfficeDocumentParser.supportedExtensions.contains(item.extension.toLowerCase())) {
       Navigator.push(
         context,
         MaterialPageRoute(

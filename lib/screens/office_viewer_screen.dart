@@ -886,12 +886,15 @@ class _OfficeViewerScreenState extends State<OfficeViewerScreen> {
     final sheets = _excelDoc!.sheets;
     final currentSheet = sheets[_selectedSheetIndex.clamp(0, sheets.length - 1)];
 
-    // Filter rows
-    final filteredRows = _searchQuery.isEmpty
+    // Filter rows, always keeping the first row as the column header
+    final filteredRows = _searchQuery.isEmpty || currentSheet.rows.isEmpty
         ? currentSheet.rows
-        : currentSheet.rows.where((row) {
-            return row.any((cell) => cell.toLowerCase().contains(_searchQuery.toLowerCase()));
-          }).toList();
+        : [
+            currentSheet.rows.first,
+            ...currentSheet.rows.skip(1).where((row) {
+              return row.any((cell) => cell.toLowerCase().contains(_searchQuery.toLowerCase()));
+            }),
+          ];
 
     return Column(
       children: [
@@ -979,7 +982,7 @@ class _OfficeViewerScreenState extends State<OfficeViewerScreen> {
 
         // Interactive Data Grid
         Expanded(
-          child: filteredRows.isEmpty
+          child: filteredRows.isEmpty || (_searchQuery.isNotEmpty && filteredRows.length <= 1)
               ? const Center(child: Text('No matching rows found'))
               : SingleChildScrollView(
                   scrollDirection: Axis.vertical,
@@ -990,7 +993,10 @@ class _OfficeViewerScreenState extends State<OfficeViewerScreen> {
                         _themeColor.withAlpha(isDark ? 60 : 30),
                       ),
                       columns: List.generate(currentSheet.totalColumns, (colIdx) {
-                        final colLetter = String.fromCharCode(65 + (colIdx % 26));
+                        var colLetter = '';
+                        for (var n = colIdx + 1; n > 0; n = (n - 1) ~/ 26) {
+                          colLetter = String.fromCharCode(65 + (n - 1) % 26) + colLetter;
+                        }
                         final headerLabel = (filteredRows.isNotEmpty && colIdx < filteredRows.first.length)
                             ? filteredRows.first[colIdx]
                             : colLetter;
