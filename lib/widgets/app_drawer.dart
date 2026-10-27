@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import '../screens/camera_doc_scanner_screen.dart';
 import '../screens/document_suite_screen.dart';
 import '../screens/explorer_screen.dart';
+import '../screens/image_tools_screen.dart';
+import '../screens/pdf_tools_screen.dart';
 import '../screens/quick_drop_screen.dart';
 import '../screens/search_screen.dart';
 import '../services/storage_service.dart';
@@ -182,6 +184,51 @@ class AppDrawer extends StatelessWidget {
                 ),
 
                 const Divider(height: 24),
+                _sectionHeader('IMAGE & PDF TOOLS'),
+                _drawerTile(
+                  context,
+                  icon: ImageTool.removeBackground.icon,
+                  iconColor: ImageTool.removeBackground.color,
+                  title: 'Remove Background',
+                  subtitle: 'Cut out subjects, save transparent PNG',
+                  badge: 'AI',
+                  badgeColor: Colors.deepPurple,
+                  onTap: () => _openImageTool(context, ImageTool.removeBackground),
+                ),
+                _drawerTile(
+                  context,
+                  icon: ImageTool.resize.icon,
+                  iconColor: ImageTool.resize.color,
+                  title: 'Image Resizer',
+                  subtitle: 'Change width & height in pixels',
+                  onTap: () => _openImageTool(context, ImageTool.resize),
+                ),
+                _drawerTile(
+                  context,
+                  icon: ImageTool.compress.icon,
+                  iconColor: ImageTool.compress.color,
+                  title: 'Image Compressor',
+                  subtitle: 'Shrink photos by quality or target KB',
+                  onTap: () => _openImageTool(context, ImageTool.compress),
+                ),
+                _drawerTile(
+                  context,
+                  icon: Icons.compress_rounded,
+                  iconColor: Colors.red,
+                  title: 'PDF Compressor',
+                  subtitle: 'Reduce PDF file size',
+                  onTap: () => _openPdfTool(context, PdfTool.compress),
+                ),
+                _drawerTile(
+                  context,
+                  icon: Icons.aspect_ratio_rounded,
+                  iconColor: Colors.blueGrey,
+                  title: 'PDF Resize',
+                  subtitle: 'Fit pages to A4, Letter, A5...',
+                  onTap: () => _openPdfTool(context, PdfTool.resize),
+                ),
+
+                const Divider(height: 24),
                 _sectionHeader('TRANSFER & STORAGE'),
                 _drawerTile(
                   context,
@@ -275,6 +322,22 @@ class AppDrawer extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+
+  void _openImageTool(BuildContext context, ImageTool tool) {
+    Navigator.pop(context);
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => ImageToolsScreen(tool: tool)),
+    );
+  }
+
+  void _openPdfTool(BuildContext context, PdfTool tool) {
+    Navigator.pop(context);
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => PdfToolsScreen(tool: tool)),
     );
   }
 
