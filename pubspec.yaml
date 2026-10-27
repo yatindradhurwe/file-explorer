@@ -1,0 +1,45 @@
+name: file_explorer
+description: "File Explore - Instant Drop & Storage Manager by yjtechnosoft"
+publish_to: 'none'
+
+version: 1.0.2+3
+
+environment:
+  sdk: ^3.13.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  permission_handler: ^13.0.2
+  path_provider: ^2.1.6
+  path: ^1.9.1
+  open_filex: ^5.0.0
+  share_plus: ^13.3.1
+  intl: ^0.20.3
+  qr_flutter: ^4.1.0
+  pdf: ^3.13.1
+  image_picker: ^1.2.4
+  flutter_pdfview: ^1.4.5
+  image: ^4.12.0
+  camera: ^0.12.1
+  archive: ^4.0.0
+  xml: ^7.0.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "assets/icons/app_icon.jpg"
+  min_sdk_android: 24
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/icons/
